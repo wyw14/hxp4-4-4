@@ -8,7 +8,7 @@ import {
   lerp,
   type SignalMatch
 } from './signal';
-import { PlaybackSystem, type PlaybackSnapshot } from './playback';
+import { PlaybackSystem, HIT_SIGNAL_THRESHOLD, type PlaybackSnapshot } from './playback';
 import type { Signal, SignalsData, TunerState, WeatherOffset } from './types';
 
 class Game {
@@ -31,6 +31,7 @@ class Game {
 
   private foundSignals: Set<string> = new Set();
   private signalOverlayActive: boolean = false;
+  private lastOverlaySignalId: string | null = null;
   private binaryStream: string = '';
   private binaryTimer: number = 0;
 
@@ -207,38 +208,57 @@ class Game {
       return Math.max(0, Math.min(1, x / rect.width));
     };
 
+    const startSeek = (progress: number): void => {
+      isDragging = true;
+      this.playbackSystem.seekTo(progress);
+      this.playbackSystem.beginSeek();
+    };
+
+    const updateSeek = (progress: number): void => {
+      if (isDragging) {
+        this.playbackSystem.seekTo(progress);
+      }
+    };
+
+    const endSeek = (): void => {
+      if (isDragging) {
+        isDragging = false;
+        this.playbackSystem.endSeek();
+      }
+    };
+
     track.addEventListener('mousedown', (e) => {
       e.preventDefault();
-      isDragging = true;
-      this.playbackSystem.seekTo(getProgress(e.clientX));
+      startSeek(getProgress(e.clientX));
     });
 
     window.addEventListener('mousemove', (e) => {
-      if (isDragging) {
-        this.playbackSystem.seekTo(getProgress(e.clientX));
-      }
+      updateSeek(getProgress(e.clientX));
     });
 
     window.addEventListener('mouseup', () => {
-      isDragging = false;
+      endSeek();
     });
 
     track.addEventListener('touchstart', (e) => {
       e.preventDefault();
-      isDragging = true;
       if (e.touches.length > 0) {
-        this.playbackSystem.seekTo(getProgress(e.touches[0].clientX));
+        startSeek(getProgress(e.touches[0].clientX));
       }
     }, { passive: false });
 
     window.addEventListener('touchmove', (e) => {
-      if (isDragging && e.touches.length > 0) {
-        this.playbackSystem.seekTo(getProgress(e.touches[0].clientX));
+      if (e.touches.length > 0) {
+        updateSeek(getProgress(e.touches[0].clientX));
       }
     });
 
     window.addEventListener('touchend', () => {
-      isDragging = false;
+      endSeek();
+    });
+
+    window.addEventListener('touchcancel', () => {
+      endSeek();
     });
   }
 
@@ -284,7 +304,10 @@ class Game {
     this.elements.signalFill.style.width = `${fillPercent.toFixed(1)}%`;
 
     const shouldShowOverlay = this.smoothedStrength > 0.7;
-    if (shouldShowOverlay !== this.signalOverlayActive) {
+    const currentSignalId = this.currentMatch.signal?.id ?? null;
+    const signalChanged = currentSignalId !== this.lastOverlaySignalId;
+
+    if (shouldShowOverlay !== this.signalOverlayActive || (shouldShowOverlay && signalChanged)) {
       this.signalOverlayActive = shouldShowOverlay;
       this.elements.signalOverlay.classList.toggle('active', shouldShowOverlay);
 
@@ -299,6 +322,7 @@ class Game {
           this.elements.foundCount.textContent = `Signals found: ${this.foundSignals.size} / ${this.signals.length}`;
         }
       }
+      this.lastOverlaySignalId = currentSignalId;
     }
 
     this.binaryTimer += 1;
@@ -325,20 +349,10 @@ class Game {
     this.elements.playbackDuration.textContent = this.formatTime(Math.min(maxDuration, duration));
 
     if (this.isReplayMode) {
-      const rec = this.playbackSystem.getRecords();
-      if (rec.length > 1) {
-        const startTime = rec[0].timestamp;
-        const currentDuration = rec[rec.length - 1].timestamp - startTime;
-        const idx = this.playbackSystem['replayIndex'];
-        if (idx >= 0 && idx < rec.length) {
-          const elapsed = rec[idx].timestamp - startTime;
-          this.elements.playbackTime.textContent = this.formatTime(elapsed);
-          if (currentDuration > 0) {
-            const handlePercent = (elapsed / currentDuration) * 100;
-            this.elements.timelineHandle.style.left = `${handlePercent.toFixed(2)}%`;
-          }
-        }
-      }
+      const progress = this.playbackSystem.getReplayProgress();
+      const elapsedMs = progress * duration;
+      this.elements.playbackTime.textContent = this.formatTime(elapsedMs);
+      this.elements.timelineHandle.style.left = `${(progress * 100).toFixed(2)}%`;
     } else {
       this.elements.playbackTime.textContent = this.formatTime(duration);
       this.elements.timelineHandle.style.left = `${fillPercent.toFixed(2)}%`;
@@ -358,7 +372,7 @@ class Game {
     let lastWasHit = false;
 
     for (const rec of records) {
-      const isHit = rec.hitChannelId !== null && rec.signalStrength > 0.7;
+      const isHit = rec.hitChannelId !== null && rec.signalStrength >= HIT_SIGNAL_THRESHOLD;
       if (isHit && !lastWasHit) {
         const percent = ((rec.timestamp - startTime) / duration) * 100;
         markers.push({ percent });

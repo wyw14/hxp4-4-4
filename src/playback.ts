@@ -2,6 +2,7 @@ import type { PlaybackRecord, TunerState } from './types';
 
 const MAX_DURATION_MS = 120000;
 const RECORD_INTERVAL_MS = 50;
+export const HIT_SIGNAL_THRESHOLD = 0.7;
 
 export interface PlaybackSnapshot {
   tuner: TunerState;
@@ -19,7 +20,9 @@ export class PlaybackSystem {
   private mode: PlaybackMode = 'live';
   private replayIndex: number = -1;
   private replayTime: number = 0;
+  private isSeekDragging: boolean = false;
   private lastRecordTime: number = 0;
+  private lastReplayFrameTime: number = 0;
   private onModeChange: ModeChangeCallback | null = null;
   private onSnapshot: SnapshotCallback | null = null;
 
@@ -46,6 +49,14 @@ export class PlaybackSystem {
     return this.records[this.records.length - 1].timestamp - this.records[0].timestamp;
   }
 
+  getReplayProgress(): number {
+    if (this.records.length < 2 || this.replayIndex < 0) return 0;
+    const startTime = this.records[0].timestamp;
+    const duration = this.getDurationMs();
+    if (duration <= 0) return 0;
+    return Math.max(0, Math.min(1, (this.replayTime - startTime) / duration));
+  }
+
   record(tuner: TunerState, signalStrength: number, hitChannelId: string | null): void {
     if (this.mode !== 'live') return;
 
@@ -53,13 +64,15 @@ export class PlaybackSystem {
     if (now - this.lastRecordTime < RECORD_INTERVAL_MS) return;
     this.lastRecordTime = now;
 
+    const effectiveHitId = signalStrength >= HIT_SIGNAL_THRESHOLD ? hitChannelId : null;
+
     this.records.push({
       timestamp: now,
       vhf: tuner.vhf,
       uhf: tuner.uhf,
       antenna: tuner.antenna,
       signalStrength,
-      hitChannelId
+      hitChannelId: effectiveHitId
     });
 
     this.trimOldRecords();
@@ -72,6 +85,21 @@ export class PlaybackSystem {
     while (this.records.length > 0 && this.records[0].timestamp < cutoff) {
       this.records.shift();
     }
+  }
+
+  beginSeek(): void {
+    if (this.mode !== 'replay') return;
+    this.isSeekDragging = true;
+  }
+
+  endSeek(): void {
+    if (this.mode !== 'replay') return;
+    this.isSeekDragging = false;
+    this.lastReplayFrameTime = performance.now();
+  }
+
+  isSeeking(): boolean {
+    return this.isSeekDragging;
   }
 
   seekTo(progress: number): void {
@@ -99,26 +127,29 @@ export class PlaybackSystem {
 
     this.replayIndex = nearestIndex;
     this.replayTime = this.records[nearestIndex].timestamp;
+    this.lastReplayFrameTime = performance.now();
     this.emitSnapshot(nearestIndex);
   }
 
   resumeLive(): void {
     this.replayIndex = -1;
     this.replayTime = 0;
+    this.isSeekDragging = false;
     this.setMode('live');
   }
 
   updateReplay(): void {
     if (this.mode !== 'replay') return;
+    if (this.isSeekDragging) return;
     if (this.replayIndex < 0 || this.replayIndex >= this.records.length) return;
 
     const now = performance.now();
-    const elapsed = now - this._lastReplayFrameTime;
-    this._lastReplayFrameTime = now;
+    const elapsed = now - this.lastReplayFrameTime;
+    this.lastReplayFrameTime = now;
 
     if (elapsed <= 0) return;
 
-    let targetTime = this.replayTime + elapsed;
+    const targetTime = this.replayTime + elapsed;
     const latestTime = this.records[this.records.length - 1].timestamp;
 
     if (targetTime >= latestTime) {
@@ -132,14 +163,6 @@ export class PlaybackSystem {
 
     this.replayTime = targetTime;
     this.emitSnapshot(this.replayIndex);
-  }
-
-  private _lastReplayFrameTime: number = 0;
-
-  startReplay(progress: number = 0): void {
-    if (this.records.length === 0) return;
-    this._lastReplayFrameTime = performance.now();
-    this.seekTo(progress);
   }
 
   private setMode(mode: PlaybackMode): void {
