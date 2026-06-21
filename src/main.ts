@@ -8,6 +8,7 @@ import {
   lerp,
   type SignalMatch
 } from './signal';
+import { PlaybackSystem, type PlaybackSnapshot } from './playback';
 import type { Signal, SignalsData, TunerState, WeatherOffset } from './types';
 
 class Game {
@@ -15,6 +16,7 @@ class Game {
   private audioManager: AudioManager;
   private knobController: KnobController | null = null;
   private weatherSystem: WeatherSystem | null = null;
+  private playbackSystem: PlaybackSystem;
 
   private signals: Signal[] = [];
   private tuner: TunerState = { vhf: 100, uhf: 400, antenna: 180 };
@@ -32,6 +34,9 @@ class Game {
   private binaryStream: string = '';
   private binaryTimer: number = 0;
 
+  private isReplayMode: boolean = false;
+  private lastWeatherResult: { offset: WeatherOffset; rainIntensity: number; flash: boolean } | null = null;
+
   private elements: {
     signalFill: HTMLElement;
     signalOverlay: HTMLElement;
@@ -40,11 +45,21 @@ class Game {
     binaryStream: HTMLElement;
     foundCount: HTMLElement;
     audioToggle: HTMLButtonElement;
+    playbackStatus: HTMLElement;
+    timelineTrack: HTMLElement;
+    timelineFill: HTMLElement;
+    timelineSignals: HTMLElement;
+    timelineHandle: HTMLElement;
+    liveBtn: HTMLButtonElement;
+    playbackTime: HTMLElement;
+    playbackDuration: HTMLElement;
   };
 
   constructor() {
     this.audioManager = new AudioManager();
+    this.playbackSystem = new PlaybackSystem();
     this.elements = this.getElements();
+    this.setupPlaybackCallbacks();
   }
 
   private getElements() {
@@ -61,8 +76,57 @@ class Game {
       signalDescription: get('signalOverlay').querySelector('.signal-description') as HTMLElement,
       binaryStream: get('signalOverlay').querySelector('.binary-stream') as HTMLElement,
       foundCount: get('foundCount'),
-      audioToggle: get('audioToggle') as HTMLButtonElement
+      audioToggle: get('audioToggle') as HTMLButtonElement,
+      playbackStatus: get('playbackStatus'),
+      timelineTrack: get('timelineTrack'),
+      timelineFill: get('timelineFill'),
+      timelineSignals: get('timelineSignals'),
+      timelineHandle: get('timelineHandle'),
+      liveBtn: get('liveBtn') as HTMLButtonElement,
+      playbackTime: get('playbackTime'),
+      playbackDuration: get('playbackDuration')
     };
+  }
+
+  private setupPlaybackCallbacks(): void {
+    this.playbackSystem.setOnModeChange((mode) => {
+      this.isReplayMode = mode === 'replay';
+      this.elements.playbackStatus.textContent = mode === 'replay' ? 'REPLAY' : 'LIVE';
+      this.elements.playbackStatus.classList.toggle('replay', mode === 'replay');
+      this.elements.timelineHandle.classList.toggle('active', mode === 'replay');
+    });
+
+    this.playbackSystem.setOnSnapshot((snapshot: PlaybackSnapshot) => {
+      this.applySnapshot(snapshot);
+    });
+  }
+
+  private applySnapshot(snapshot: PlaybackSnapshot): void {
+    this.tuner = { ...snapshot.tuner };
+    this.smoothedStrength = snapshot.signalStrength;
+
+    if (this.knobController) {
+      this.knobController.setValue('vhf', snapshot.tuner.vhf);
+      this.knobController.setValue('uhf', snapshot.tuner.uhf);
+      this.knobController.setValue('antenna', snapshot.tuner.antenna);
+    }
+
+    if (snapshot.hitChannelId) {
+      const signal = this.signals.find(s => s.id === snapshot.hitChannelId);
+      if (signal) {
+        this.currentMatch.signal = signal;
+        this.currentMatch.strength = snapshot.signalStrength;
+      }
+    } else {
+      this.currentMatch.signal = null;
+      this.currentMatch.strength = snapshot.signalStrength;
+    }
+
+    this.smoothedDistortion = 1 - this.smoothedStrength * 0.85;
+    this.smoothedStatic = 1 - this.smoothedStrength * 0.7;
+    this.smoothedVhsTint = this.smoothedStrength > 0.4 ? this.smoothedStrength : 0;
+    const targetColor = getSignalColor(this.currentMatch.signal, this.smoothedStrength);
+    this.smoothedSignalColor = targetColor;
   }
 
   async init(): Promise<void> {
@@ -107,7 +171,9 @@ class Game {
         sensitivity: 1.5
       }
     ], (param: KnobParam, value: number) => {
-      this.tuner[param] = value;
+      if (!this.isReplayMode) {
+        this.tuner[param] = value;
+      }
     });
 
     this.elements.audioToggle.addEventListener('click', async () => {
@@ -119,6 +185,9 @@ class Game {
       this.elements.audioToggle.classList.toggle('active', enabled);
     });
 
+    this.setupTimelineEvents();
+    this.setupLiveButton();
+
     window.addEventListener('resize', () => {
       this.renderer?.resize();
     });
@@ -126,6 +195,57 @@ class Game {
     void this.knobController;
 
     this.animate();
+  }
+
+  private setupTimelineEvents(): void {
+    const track = this.elements.timelineTrack;
+    let isDragging = false;
+
+    const getProgress = (clientX: number): number => {
+      const rect = track.getBoundingClientRect();
+      const x = clientX - rect.left;
+      return Math.max(0, Math.min(1, x / rect.width));
+    };
+
+    track.addEventListener('mousedown', (e) => {
+      e.preventDefault();
+      isDragging = true;
+      this.playbackSystem.seekTo(getProgress(e.clientX));
+    });
+
+    window.addEventListener('mousemove', (e) => {
+      if (isDragging) {
+        this.playbackSystem.seekTo(getProgress(e.clientX));
+      }
+    });
+
+    window.addEventListener('mouseup', () => {
+      isDragging = false;
+    });
+
+    track.addEventListener('touchstart', (e) => {
+      e.preventDefault();
+      isDragging = true;
+      if (e.touches.length > 0) {
+        this.playbackSystem.seekTo(getProgress(e.touches[0].clientX));
+      }
+    }, { passive: false });
+
+    window.addEventListener('touchmove', (e) => {
+      if (isDragging && e.touches.length > 0) {
+        this.playbackSystem.seekTo(getProgress(e.touches[0].clientX));
+      }
+    });
+
+    window.addEventListener('touchend', () => {
+      isDragging = false;
+    });
+  }
+
+  private setupLiveButton(): void {
+    this.elements.liveBtn.addEventListener('click', () => {
+      this.playbackSystem.resumeLive();
+    });
   }
 
   private async loadSignals(): Promise<SignalsData> {
@@ -194,22 +314,103 @@ class Game {
     }
   }
 
+  private updateTimelineUI(): void {
+    const records = this.playbackSystem.getRecords();
+    const duration = this.playbackSystem.getDurationMs();
+    const maxDuration = 120000;
+
+    const fillPercent = duration > 0 ? (duration / maxDuration) * 100 : 0;
+    this.elements.timelineFill.style.width = `${fillPercent.toFixed(1)}%`;
+
+    this.elements.playbackDuration.textContent = this.formatTime(Math.min(maxDuration, duration));
+
+    if (this.isReplayMode) {
+      const rec = this.playbackSystem.getRecords();
+      if (rec.length > 1) {
+        const startTime = rec[0].timestamp;
+        const currentDuration = rec[rec.length - 1].timestamp - startTime;
+        const idx = this.playbackSystem['replayIndex'];
+        if (idx >= 0 && idx < rec.length) {
+          const elapsed = rec[idx].timestamp - startTime;
+          this.elements.playbackTime.textContent = this.formatTime(elapsed);
+          if (currentDuration > 0) {
+            const handlePercent = (elapsed / currentDuration) * 100;
+            this.elements.timelineHandle.style.left = `${handlePercent.toFixed(2)}%`;
+          }
+        }
+      }
+    } else {
+      this.elements.playbackTime.textContent = this.formatTime(duration);
+      this.elements.timelineHandle.style.left = `${fillPercent.toFixed(2)}%`;
+    }
+
+    this.updateSignalMarkers(records);
+  }
+
+  private updateSignalMarkers(records: { timestamp: number; signalStrength: number; hitChannelId: string | null }[]): void {
+    if (records.length < 2) return;
+
+    const startTime = records[0].timestamp;
+    const duration = records[records.length - 1].timestamp - startTime;
+    if (duration <= 0) return;
+
+    const markers: { percent: number }[] = [];
+    let lastWasHit = false;
+
+    for (const rec of records) {
+      const isHit = rec.hitChannelId !== null && rec.signalStrength > 0.7;
+      if (isHit && !lastWasHit) {
+        const percent = ((rec.timestamp - startTime) / duration) * 100;
+        markers.push({ percent });
+      }
+      lastWasHit = isHit;
+    }
+
+    const existingMarkers = this.elements.timelineSignals.querySelectorAll('.timeline-signal-marker');
+    existingMarkers.forEach(m => m.remove());
+
+    for (const marker of markers) {
+      const el = document.createElement('div');
+      el.className = 'timeline-signal-marker';
+      el.style.left = `${marker.percent}%`;
+      this.elements.timelineSignals.appendChild(el);
+    }
+  }
+
+  private formatTime(ms: number): string {
+    const totalSeconds = Math.floor(ms / 1000);
+    const minutes = Math.floor(totalSeconds / 60);
+    const seconds = totalSeconds % 60;
+    return `${minutes.toString().padStart(2, '0')}:${seconds.toString().padStart(2, '0')}`;
+  }
+
   private animate(): void {
     if (this.weatherSystem) {
-      const weatherResult = this.weatherSystem.update();
-      this.weatherOffset = weatherResult.offset;
-      this.updateSignalMatch();
-      this.updateSmoothing();
+      if (!this.isReplayMode) {
+        const weatherResult = this.weatherSystem.update();
+        this.lastWeatherResult = weatherResult;
+        this.weatherOffset = weatherResult.offset;
+        this.updateSignalMatch();
+        this.updateSmoothing();
 
-      if (this.renderer) {
+        this.playbackSystem.record(
+          this.tuner,
+          this.smoothedStrength,
+          this.currentMatch.signal?.id ?? null
+        );
+      } else {
+        this.playbackSystem.updateReplay();
+      }
+
+      if (this.renderer && this.lastWeatherResult) {
         this.renderer.render({
           signalStrength: this.smoothedStrength,
           staticAmount: this.smoothedStatic,
           distortionAmount: this.smoothedDistortion,
           vhsTint: this.smoothedVhsTint,
           signalColor: this.smoothedSignalColor,
-          rainIntensity: weatherResult.rainIntensity,
-          flash: weatherResult.flash
+          rainIntensity: this.lastWeatherResult.rainIntensity,
+          flash: this.lastWeatherResult.flash
         });
       }
 
@@ -227,6 +428,7 @@ class Game {
       this.audioManager.update();
 
       this.updateUI();
+      this.updateTimelineUI();
     }
 
     requestAnimationFrame(() => this.animate());

@@ -70,6 +70,29 @@
           <div>Drag knobs to tune • Scroll to fine-tune</div>
           <div id="foundCount">Signals found: 0 / 4</div>
         </div>
+
+        <div class="playback-panel">
+          <div class="playback-header">
+            <div class="playback-label">REPLAY</div>
+            <div class="playback-status" id="playbackStatus">LIVE</div>
+          </div>
+          <div class="timeline-container" id="timelineContainer">
+            <div class="timeline-track" id="timelineTrack">
+              <div class="timeline-fill" id="timelineFill"></div>
+              <div class="timeline-signals" id="timelineSignals"></div>
+              <div class="timeline-handle" id="timelineHandle"></div>
+            </div>
+          </div>
+          <div class="playback-controls">
+            <button class="playback-btn" id="liveBtn">
+              <span class="playback-btn-icon">●</span>
+              <span>LIVE</span>
+            </button>
+            <div class="playback-time">
+              <span id="playbackTime">00:00</span> / <span id="playbackDuration">02:00</span>
+            </div>
+          </div>
+        </div>
       </div>
     </div>
   </div>

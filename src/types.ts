@@ -49,3 +49,12 @@ export interface KnobState {
   startY: number;
   startValue: number;
 }
+
+export interface PlaybackRecord {
+  timestamp: number;
+  vhf: number;
+  uhf: number;
+  antenna: number;
+  signalStrength: number;
+  hitChannelId: string | null;
+}
